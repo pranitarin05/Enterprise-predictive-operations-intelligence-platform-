@@ -1,0 +1,22 @@
+# --- Web framework (used starting Phase 4) ---
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+
+# --- Configuration management ---
+pydantic==2.9.2
+pydantic-settings==2.6.0
+python-dotenv==1.0.1
+
+# --- Storage clients ---
+boto3==1.35.36          # S3-compatible client, works with MinIO identically to real AWS S3
+
+# --- Kafka client ---
+confluent-kafka==2.6.0  # Industry-standard Kafka client, C-based, fast and production-grade
+
+# --- Database (used starting Phase 5) ---
+sqlalchemy==2.0.36
+psycopg2-binary==2.9.10
+alembic==1.13.3
+
+# --- Redis client (used starting Phase 5+) ---
+redis==5.1.1

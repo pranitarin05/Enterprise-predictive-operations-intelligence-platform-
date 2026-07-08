@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     s3_access_key: str = "minioadmin"
     s3_secret_key: str = "minioadmin"
     s3_bucket_bronze: str = "epoip-bronze"
+    s3_bucket_silver: str = "epoip-silver"
+    s3_bucket_gold: str = "epoip-gold"
 
     kafka_bootstrap_servers: str = "localhost:9092"
 

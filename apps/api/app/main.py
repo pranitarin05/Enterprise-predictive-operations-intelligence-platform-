@@ -1,16 +1,12 @@
 """
 FastAPI application entrypoint.
-
-This file's only job is to create the app and wire up routers.
-No business logic, no direct database access — everything is delegated
-to the layers we built (routes -> services -> repositories/infrastructure).
 """
 
 import logging
 
 from fastapi import FastAPI
 
-from app.api.routes import health
+from app.api.routes import health, auth
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,6 +21,7 @@ app = FastAPI(
 )
 
 app.include_router(health.router)
+app.include_router(auth.router)
 
 
 @app.on_event("startup")

@@ -1,14 +1,8 @@
 """
 Silver-layer transformation job.
-
-Reads Bronze ERP events (raw, loosely-typed, as-arrived) and produces:
-  1. A clean Silver Delta table -- validated, properly typed, deduplicated
-  2. A dead-letter Delta table -- records that failed validation, kept
-     for investigation instead of silently dropped or crashing the job
-
-This is a BATCH job (not streaming) -- it processes whatever's currently
-in Bronze each time it runs. Airflow will schedule this repeatedly in a
-later phase; for now we run it manually to see and verify the logic.
+v3: extracts po_entity_id from shipment_delayed events, linking each
+delay directly to its originating purchase order for per-order
+prediction (avoiding daily-aggregation signal dilution).
 """
 
 import sys
@@ -17,19 +11,14 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from pyspark.sql.functions import col, when, lit, count
-from pyspark.sql.types import (
-    DecimalType,
-    IntegerType,
-)
+from pyspark.sql.types import DecimalType, IntegerType
 
 from config.spark_session import get_spark_session
 from config.settings import settings
 
 VALID_EVENT_TYPES = {
-    "purchase_order_created",
-    "shipment_delayed",
-    "inventory_low_stock",
-    "supplier_price_change",
+    "purchase_order_created", "shipment_delayed",
+    "inventory_low_stock", "supplier_price_change",
 }
 
 
@@ -43,15 +32,10 @@ def main():
     bronze_df = spark.read.format("delta").load(bronze_path)
     print(f"Read {bronze_df.count()} rows from Bronze.")
 
-    # --- Deduplicate first: same event_id arriving twice (e.g. producer
-    # retry after a network blip) should only count once downstream. ---
     deduped_df = bronze_df.dropDuplicates(["event_id"])
     duplicate_count = bronze_df.count() - deduped_df.count()
     print(f"Removed {duplicate_count} duplicate event_id(s).")
 
-    # --- Validation rule: flag every row as valid or invalid, with a
-    # human-readable reason, instead of silently filtering. This makes
-    # debugging data quality issues far easier than a bare .filter(). ---
     validated_df = deduped_df.withColumn(
         "validation_error",
         when(col("event_type").isNull() | (~col("event_type").isin(list(VALID_EVENT_TYPES))),
@@ -67,48 +51,29 @@ def main():
 
     print(f"Valid: {valid_df.count()} | Invalid (dead-letter): {invalid_df.count()}")
 
-    # --- Type-safety improvement over Bronze: pull specific known numeric
-    # fields out of the loose payload map and cast them properly, instead
-    # of leaving everything as strings inside a MapType forever. ---
     silver_df = (
         valid_df
-        .withColumn(
-            "amount_usd",
-            when(col("payload.amount_usd").isNotNull(),
-                 col("payload.amount_usd").cast(DecimalType(12, 2))),
-        )
-        .withColumn(
-            "delay_days",
-            when(col("payload.delay_days").isNotNull(),
-                 col("payload.delay_days").cast(IntegerType())),
-        )
-        .withColumn(
-            "quantity_remaining",
-            when(col("payload.quantity_remaining").isNotNull(),
-                 col("payload.quantity_remaining").cast(IntegerType())),
-        )
+        .withColumn("amount_usd", when(col("payload.amount_usd").isNotNull(),
+                    col("payload.amount_usd").cast(DecimalType(12, 2))))
+        .withColumn("delay_days", when(col("payload.delay_days").isNotNull(),
+                    col("payload.delay_days").cast(IntegerType())))
+        .withColumn("quantity_remaining", when(col("payload.quantity_remaining").isNotNull(),
+                    col("payload.quantity_remaining").cast(IntegerType())))
+        .withColumn("supplier", when(col("payload.supplier").isNotNull(), col("payload.supplier")))
+        .withColumn("po_entity_id", when(col("payload.po_entity_id").isNotNull(), col("payload.po_entity_id")))
     )
 
-    (
-        silver_df.write.format("delta")
-        .mode("overwrite")
-        .option("overwriteSchema", "true")
-        .save(silver_path)
-    )
+    (silver_df.write.format("delta").mode("overwrite")
+        .option("overwriteSchema", "true").save(silver_path))
     print(f"Wrote {silver_df.count()} rows to Silver at {silver_path}")
 
     if invalid_df.count() > 0:
-        (
-            invalid_df.write.format("delta")
-            .mode("overwrite")
-            .option("overwriteSchema", "true")
-            .save(dead_letter_path)
-        )
+        (invalid_df.write.format("delta").mode("overwrite")
+            .option("overwriteSchema", "true").save(dead_letter_path))
         print(f"Wrote {invalid_df.count()} rows to dead-letter at {dead_letter_path}")
     else:
         print("No dead-letter records this run.")
 
-    # --- Quick summary breakdown, useful for sanity-checking the run ---
     print("\nEvent type breakdown in Silver:")
     silver_df.groupBy("event_type").agg(count("*").alias("row_count")).show()
 

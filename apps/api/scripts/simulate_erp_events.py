@@ -1,19 +1,14 @@
 """
-Simulates a richer stream of ERP events for local development and model
-training. Bakes in an intentional, learnable (but noisy) pattern:
-shipments from certain suppliers, combined with certain delay reasons,
-have measurably higher delay risk -- this gives the training pipeline
-a genuine signal to learn, rather than pure randomness.
-
-Real ERP integration would replace this script entirely; this exists to
-prove the ingestion -> training pipeline works correctly before any real
-company's data flows through it.
+Simulates ERP events with shipment_delayed events explicitly linked to
+their originating purchase_order_created event via po_entity_id -- this
+enables per-order delay prediction (a cleaner, less diluted problem than
+daily aggregation, where one day's ~8 orders from different suppliers
+washed out individual supplier risk signal).
 """
 
 import logging
 import random
 import sys
-import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -50,7 +45,7 @@ def generate_purchase_order(event_time: datetime, supplier: str) -> ERPEvent:
     )
 
 
-def generate_shipment_event(event_time: datetime, supplier: str) -> ERPEvent | None:
+def generate_shipment_event(event_time: datetime, supplier: str, po_entity_id: str) -> ERPEvent | None:
     is_high_risk_supplier = supplier in HIGH_RISK_SUPPLIERS
     reason = random.choice(HIGH_RISK_REASONS if is_high_risk_supplier else ALL_REASONS)
     is_high_risk_reason = reason in HIGH_RISK_REASONS
@@ -70,7 +65,12 @@ def generate_shipment_event(event_time: datetime, supplier: str) -> ERPEvent | N
         tenant_id=TEST_TENANT_ID,
         event_type=ERPEventType.SHIPMENT_DELAYED,
         entity_id=str(uuid.uuid4()),
-        payload={"reason": reason, "delay_days": delay_days},
+        payload={
+            "supplier": supplier,
+            "reason": reason,
+            "delay_days": delay_days,
+            "po_entity_id": po_entity_id,
+        },
         event_time=event_time,
     )
 
@@ -88,7 +88,7 @@ def generate_inventory_event(event_time: datetime) -> ERPEvent:
     )
 
 
-def main(num_days: int = 60, orders_per_day: int = 8) -> None:
+def main(num_days: int = 180, orders_per_day: int = 8) -> None:
     logger.info(f"Simulating {num_days} days of ERP events for tenant {TEST_TENANT_ID}...")
 
     start_date = datetime.now(timezone.utc) - timedelta(days=num_days)
@@ -104,7 +104,7 @@ def main(num_days: int = 60, orders_per_day: int = 8) -> None:
             publish_erp_event(po_event)
             total_published += 1
 
-            shipment_event = generate_shipment_event(event_time, supplier)
+            shipment_event = generate_shipment_event(event_time, supplier, po_event.entity_id)
             if shipment_event:
                 publish_erp_event(shipment_event)
                 total_published += 1
@@ -113,7 +113,7 @@ def main(num_days: int = 60, orders_per_day: int = 8) -> None:
             publish_erp_event(generate_inventory_event(event_time))
             total_published += 1
 
-        if day_offset % 10 == 0:
+        if day_offset % 30 == 0:
             logger.info(f"Day {day_offset}/{num_days} simulated ({total_published} events so far)...")
 
     flush_producer()

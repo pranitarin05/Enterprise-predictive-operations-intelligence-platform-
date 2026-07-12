@@ -1,11 +1,3 @@
-"""
-Exports the Gold daily_tenant_summary Delta table to plain Parquet files.
-
-Feast's offline store reads Parquet directly, not Delta's transaction-log
-format -- this job produces a stable, Feast-readable snapshot. Run this
-after gold_aggregate_erp.py completes.
-"""
-
 import sys
 from pathlib import Path
 
@@ -18,31 +10,26 @@ from config.spark_session import get_spark_session
 from config.settings import settings
 
 
+def export_table(spark, gold_path: str, parquet_path: str, date_col: str = None, amount_cols: list = None):
+    df = spark.read.format("delta").load(gold_path)
+    if date_col and date_col in df.columns:
+        df = df.withColumn(date_col, to_timestamp(col(date_col)))
+    if amount_cols:
+        for c in amount_cols:
+            if c in df.columns:
+                df = df.withColumn(c, col(c).cast(DoubleType()))
+    df.write.mode("overwrite").parquet(parquet_path)
+    print(f"Exported {df.count()} rows to {parquet_path}")
+
+
 def main():
     spark = get_spark_session("export-gold-to-parquet")
-
-    gold_path = f"s3a://{settings.s3_bucket_gold}/daily_tenant_summary"
-    parquet_path = f"s3a://{settings.s3_bucket_gold}/feast_exports/daily_tenant_summary"
-
-    df = spark.read.format("delta").load(gold_path)
-
-    # Feast requires a true TIMESTAMP for its timestamp_field, and plain
-    # float/int types for numeric features -- it doesn't understand
-    # Python's Decimal type (which Silver's precise DecimalType casting
-    # produces). Both are Gold-table-correct choices; we adapt them here
-    # specifically for Feast's consumption, without touching Gold itself.
-    df_for_feast = (
-        df
-        .withColumn("event_date", to_timestamp(col("event_date")))
-        .withColumn("total_amount_usd", col("total_amount_usd").cast(DoubleType()))
-    )
-
-    (
-        df_for_feast.write.mode("overwrite")
-        .parquet(parquet_path)
-    )
-
-    print(f"Exported {df_for_feast.count()} rows to {parquet_path}")
+    export_table(spark, f"s3a://{settings.s3_bucket_gold}/daily_tenant_summary",
+                 f"s3a://{settings.s3_bucket_gold}/feast_exports/daily_tenant_summary",
+                 date_col="event_date", amount_cols=["total_amount_usd"])
+    export_table(spark, f"s3a://{settings.s3_bucket_gold}/order_level",
+                 f"s3a://{settings.s3_bucket_gold}/feast_exports/order_level",
+                 date_col="order_date", amount_cols=["amount_usd"])
 
 
 if __name__ == "__main__":

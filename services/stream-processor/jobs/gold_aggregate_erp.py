@@ -1,15 +1,13 @@
 """
 Gold-layer aggregation job.
 
-Reads Silver ERP events and produces pre-computed, dashboard/ML-ready
-summary tables:
-  1. daily_tenant_summary  -- one row per tenant per day per event type,
-     with counts and sums -- the core metric table dashboards will query.
-  2. supplier_spend_summary -- total purchase order spend per supplier,
-     a business-relevant rollup used later for supplier risk features.
-
-This is a BATCH job, same pattern as Silver -- run on a schedule via
-Airflow, reprocessing the full Silver table each run for now.
+v3: adds daily_supplier_delay -- delay days attributed to the SPECIFIC
+supplier whose shipment was delayed (from shipment_delayed events'
+supplier field), rather than the whole tenant-day total. The earlier
+version attributed a day's total delay to every supplier active that
+day, which washed out the real per-supplier risk signal. This table
+fixes that by aggregating strictly on shipment_delayed events, grouped
+by their own supplier field.
 """
 
 import sys
@@ -31,13 +29,12 @@ def main():
     silver_path = f"s3a://{settings.s3_bucket_silver}/erp_events"
     daily_summary_path = f"s3a://{settings.s3_bucket_gold}/daily_tenant_summary"
     supplier_summary_path = f"s3a://{settings.s3_bucket_gold}/supplier_spend_summary"
+    supplier_activity_path = f"s3a://{settings.s3_bucket_gold}/daily_supplier_activity"
+    supplier_delay_path = f"s3a://{settings.s3_bucket_gold}/daily_supplier_delay"
 
     silver_df = spark.read.format("delta").load(silver_path)
     print(f"Read {silver_df.count()} rows from Silver.")
 
-    # --- Aggregation 1: daily counts + sums per tenant per event type ---
-    # This is the core metric table -- "how many of each event type,
-    # and how much money/impact, per tenant per day."
     daily_summary_df = (
         silver_df
         .withColumn("event_date", to_date(col("event_time")))
@@ -50,19 +47,10 @@ def main():
         )
         .orderBy("event_date", "event_type")
     )
-
-    (
-        daily_summary_df.write.format("delta")
-        .mode("overwrite")
-        .option("overwriteSchema", "true")
-        .save(daily_summary_path)
-    )
+    (daily_summary_df.write.format("delta").mode("overwrite")
+        .option("overwriteSchema", "true").save(daily_summary_path))
     print(f"Wrote {daily_summary_df.count()} rows to {daily_summary_path}")
 
-    # --- Aggregation 2: supplier spend rollup ---
-    # Only purchase_order_created events have a supplier -- this pulls
-    # that subset and rolls up total spend, a business-meaningful metric
-    # and a natural future ML feature (e.g. "supplier risk score").
     supplier_summary_df = (
         silver_df
         .filter(col("event_type") == "purchase_order_created")
@@ -73,20 +61,41 @@ def main():
             avg(col("amount_usd")).alias("avg_order_value_usd"),
         )
     )
-
-    (
-        supplier_summary_df.write.format("delta")
-        .mode("overwrite")
-        .option("overwriteSchema", "true")
-        .save(supplier_summary_path)
-    )
+    (supplier_summary_df.write.format("delta").mode("overwrite")
+        .option("overwriteSchema", "true").save(supplier_summary_path))
     print(f"Wrote {supplier_summary_df.count()} rows to {supplier_summary_path}")
 
-    print("\nDaily tenant summary preview:")
-    daily_summary_df.show(10, truncate=False)
+    supplier_activity_df = (
+        silver_df
+        .filter((col("event_type") == "purchase_order_created") & col("supplier").isNotNull())
+        .withColumn("event_date", to_date(col("event_time")))
+        .groupBy("tenant_id", "event_date", "supplier")
+        .agg(
+            count("*").alias("order_count"),
+            spark_sum(coalesce(col("amount_usd"), lit(0))).alias("order_value_usd"),
+        )
+    )
+    (supplier_activity_df.write.format("delta").mode("overwrite")
+        .option("overwriteSchema", "true").save(supplier_activity_path))
+    print(f"Wrote {supplier_activity_df.count()} rows to {supplier_activity_path}")
 
-    print("\nSupplier spend summary preview:")
-    supplier_summary_df.show(10, truncate=False)
+    # --- New: delay days attributed to the SPECIFIC supplier that was delayed ---
+    supplier_delay_df = (
+        silver_df
+        .filter((col("event_type") == "shipment_delayed") & col("supplier").isNotNull())
+        .withColumn("event_date", to_date(col("event_time")))
+        .groupBy("tenant_id", "event_date", "supplier")
+        .agg(
+            count("*").alias("delay_event_count"),
+            spark_sum(coalesce(col("delay_days"), lit(0))).alias("supplier_delay_days"),
+        )
+    )
+    (supplier_delay_df.write.format("delta").mode("overwrite")
+        .option("overwriteSchema", "true").save(supplier_delay_path))
+    print(f"Wrote {supplier_delay_df.count()} rows to {supplier_delay_path}")
+
+    print("\nDaily supplier delay preview:")
+    supplier_delay_df.orderBy(col("supplier_delay_days").desc()).show(10, truncate=False)
 
 
 if __name__ == "__main__":

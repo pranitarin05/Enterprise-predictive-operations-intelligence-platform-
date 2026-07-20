@@ -5,17 +5,12 @@ FastAPI application entrypoint.
 import logging
 import os
 
-# Set MinIO/S3 credentials for MLflow's artifact downloads BEFORE any
-# MLflow-related imports happen. MLflow's S3 artifact repo uses boto3
-# under the hood, which reads these standard AWS_* env vars -- setting
-# them here (rather than relying on the terminal's shell environment)
-# ensures they're always present regardless of how/where the server
-# is started (a real deployment would set these via K8s Secrets instead).
 os.environ.setdefault("MLFLOW_S3_ENDPOINT_URL", "http://localhost:9000")
 os.environ.setdefault("AWS_ACCESS_KEY_ID", "minioadmin")
 os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "minioadmin")
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import health, auth, predictions
 
@@ -29,6 +24,17 @@ app = FastAPI(
     title="EPOIP API",
     description="Enterprise Predictive Operations Intelligence Platform — Backend API",
     version="0.1.0",
+)
+
+# Allows our Next.js frontend (running on a different port) to call this API.
+# In production this list would be the real deployed frontend domain(s) only,
+# never "*", to avoid allowing arbitrary websites to call authenticated endpoints.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.include_router(health.router)

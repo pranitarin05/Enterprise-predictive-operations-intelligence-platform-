@@ -1,6 +1,9 @@
 """
-Pydantic schemas for the prediction endpoint.
+Pydantic schemas for the prediction endpoints.
 """
+
+import uuid
+from datetime import datetime
 
 from pydantic import BaseModel, Field
 
@@ -17,3 +20,15 @@ class ShipmentDelayPredictionResponse(BaseModel):
     is_high_risk: bool
     explanation: dict[str, float]
     explanation_summary: str
+
+
+class PredictionHistoryItem(BaseModel):
+    id: uuid.UUID
+    model_name: str
+    input_payload: dict
+    prediction_value: float
+    is_high_risk: bool
+    explanation: dict
+    created_at: datetime
+
+    model_config = {"from_attributes": True}

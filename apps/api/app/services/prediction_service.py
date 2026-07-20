@@ -1,21 +1,29 @@
 """
 Prediction service -- business logic for shipment delay risk scoring.
-
-Uses the raw xgboost Booster API (DMatrix + predict) rather than the
-sklearn wrapper (predict_proba), since we load the model as a Booster
-directly (see app/ml/model_registry.py for why).
+Persists every prediction to the database for history/audit purposes.
 """
+
+import uuid
 
 import pandas as pd
 import xgboost as xgb
+from sqlalchemy.orm import Session
 
 from app.ml.model_registry import get_model, get_supplier_risk_score
 from app.ml.explainer import explain_prediction
+from app.repositories import prediction_repository
 
 RISK_THRESHOLD = 0.35
+MODEL_NAME = "shipment_delay_predictor"
 
 
-def predict_shipment_delay(supplier: str, amount_usd: float) -> dict:
+def predict_shipment_delay(
+    db: Session,
+    tenant_id: uuid.UUID,
+    user_id: uuid.UUID,
+    supplier: str,
+    amount_usd: float,
+) -> dict:
     model = get_model()
 
     supplier_risk_score = get_supplier_risk_score(supplier)
@@ -25,8 +33,6 @@ def predict_shipment_delay(supplier: str, amount_usd: float) -> dict:
     }])
 
     dmatrix = xgb.DMatrix(features_df)
-    # For a binary:logistic objective, Booster.predict() returns the
-    # probability of the positive class directly (not raw margins).
     delay_probability = float(model.predict(dmatrix)[0])
     is_high_risk = delay_probability >= RISK_THRESHOLD
 
@@ -37,6 +43,18 @@ def predict_shipment_delay(supplier: str, amount_usd: float) -> dict:
     explanation_summary = (
         f"{top_driver.replace('_', ' ')} {direction} delay risk the most "
         f"for this prediction (contribution: {explanation[top_driver]:+.4f})."
+    )
+
+    # Persist -- every prediction becomes real, queryable history.
+    prediction_repository.create_prediction(
+        db=db,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        model_name=MODEL_NAME,
+        input_payload={"supplier": supplier, "amount_usd": amount_usd},
+        prediction_value=round(delay_probability, 4),
+        is_high_risk=is_high_risk,
+        explanation=explanation,
     )
 
     return {

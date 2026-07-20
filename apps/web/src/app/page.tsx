@@ -1,12 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { apiFetch } from "@/lib/api";
 
 export default function Home() {
   const [status, setStatus] = useState<string>("checking...");
 
   useEffect(() => {
-    fetch("http://localhost:8000/health")
+    apiFetch("/health")
       .then((res) => res.json())
       .then((data) => setStatus(JSON.stringify(data)))
       .catch((err) => setStatus(`Error: ${err.message}`));

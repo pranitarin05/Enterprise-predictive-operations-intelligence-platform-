@@ -30,3 +30,4 @@ infra/data/
 
 # MLflow / model artifacts
 mlruns/
+apps/api/server.log
